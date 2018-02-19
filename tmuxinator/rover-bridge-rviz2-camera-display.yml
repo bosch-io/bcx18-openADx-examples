@@ -1,0 +1,48 @@
+# ~/.tmuxinator/rover-bridge-rviz2-camera-display.yml
+
+# Copyright (c) 2018 Bosch Software Innovations GmbH.
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Eclipse Public License v2.0
+# which accompanies this distribution, and is available at
+# http://www.eclipse.org/legal/epl-v20.html
+#
+# Contributors:
+#    Bosch Software Innovations GmbH - initial creation
+#
+# Disclaimer: This software is experimental and intended to be used on the Bosch Connected Experience 2018
+
+name: rover-bridge-rviz2-camera-display
+root: ~
+
+windows:
+  - ros:
+      layout: tiled
+      panes:
+        - pilot:
+          - source /opt/ros/kinetic/setup.bash
+          - source ~/rover-simulation/ros_catkin_ws/devel/setup.bash
+          - cd ~/rover-simulation/ardupilot/APMrover2
+          - ../Tools/autotest/sim_vehicle.sh --version
+          - tmux wait-for -S ready
+          - ../Tools/autotest/sim_vehicle.sh -j 4 -f Gazebo
+          - param load /home/vagrant/rover-simulation/ardupilot/Tools/Frame_params/3DR_Rover.param
+        - simulation:
+          - tmux wait-for ready
+          - sleep 2
+          - source /opt/ros/kinetic/setup.bash
+          - source ~/rover-simulation/ros_catkin_ws/devel/setup.bash
+          - roslaunch ardupilot_sitl_gazebo_plugin rover_maze.launch
+        - core:
+          - source /opt/ros/kinetic/setup.bash
+          - roscore
+        - bridge:
+          - source /opt/ros/kinetic/setup.bash
+          - source /opt/ros/ardent/setup.bash
+          - export ROS_MASTER_URI=http://localhost:11311
+          - ros2 run ros1_bridge dynamic_bridge --bridge-all-1to2-topics
+        - camera_info:
+          - source /opt/ros/kinetic/setup.bash
+          - rosrun topic_tools relay /rover/front/camera_front_info /rover/front/image_front_raw/camera_info
+        - RViz2:
+          - source /opt/ros/ardent/setup.bash
+          - rviz2

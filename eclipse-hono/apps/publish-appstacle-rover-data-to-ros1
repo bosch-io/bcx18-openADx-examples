@@ -1,0 +1,261 @@
+#!/usr/bin/env python2
+
+# Copyright (c) 2018 Bosch Software Innovations GmbH.
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Eclipse Public License v2.0
+# which accompanies this distribution, and is available at
+# http://www.eclipse.org/legal/epl-v20.html
+#
+# Contributors:
+#    Bosch Software Innovations GmbH - initial creation
+#
+# Disclaimer: This software is experimental and intended to be used on the Bosch Connected Experience 2018
+
+# Publishes Appstacle Rover messages from Eclipse Hono to ROS1.
+#
+# It requires a sourced ROS1 environment (e.g. source_ros1.bash)
+# and the environment variable ROS_MASTER_URI to be set.
+
+import geometry_msgs.msg
+import json
+import logging
+import optparse
+import rospy
+import sensor_msgs.msg
+import std_msgs.msg
+import sys
+import tf
+
+from copy import deepcopy
+from math import radians
+from proton.handlers import MessagingHandler
+from proton.reactor import Container
+from tf.transformations import quaternion_from_euler
+
+
+log = logging.getLogger(__file__)
+
+
+class HonoSubscriber(MessagingHandler):
+    def __init__(self, opts, ros_publisher):
+        super(HonoSubscriber, self).__init__()
+        self.opts = opts
+        self.ros_publisher = ros_publisher
+
+    def on_start(self, event):
+        log.info('start')
+        connection = event.container.connect(url=self.opts.hono_messaging_uri,
+                                             user=self.opts.hono_messaging_user,
+                                             password=self.opts.hono_messaging_password,
+                                             allowed_mechs='PLAIN')
+        event.container.create_receiver(connection, self.opts.topic)
+
+    def on_message(self, event):
+        log.debug('got message: %s', event.message)
+
+        # possible content:
+        # - event.message.properties['device_id']
+        # - event.message.body
+        # - event.message.content_type
+
+        if self.opts.device_id and self.opts.device_id != event.message.properties['device_id']:
+            log.info('dropping message with device id %s because filtering for device id %s', event.message.properties['device_id'], self.opts.device_id)
+            return
+
+        try:
+            message = json.loads(event.message.body.decode('utf-8'))
+        except ValueError:
+            log.info('dropping message due to invalid json')
+            return
+
+        self.ros_publisher.publish(message)
+
+
+class Ros1Publisher(object):
+    def __init__(self):
+        super(Ros1Publisher, self).__init__()
+
+        node_name = 'appstacle_rover_sensors'
+
+        self.transform_broadcaster = tf.TransformBroadcaster()
+
+        self.publisher_raw                  = rospy.Publisher('/appstacle/rover/raw',                  std_msgs.msg.String,              queue_size=10)
+        self.publisher_imu                  = rospy.Publisher('/appstacle/rover/imu',                  sensor_msgs.msg.Imu,              queue_size=10)
+        self.publisher_bearing              = rospy.Publisher('/appstacle/rover/bearing',              std_msgs.msg.Float32,             queue_size=10)
+        self.publisher_infrared_front_left  = rospy.Publisher('/appstacle/rover/infrared/frontleft',   sensor_msgs.msg.Range,            queue_size=10)
+        self.publisher_infrared_front_right = rospy.Publisher('/appstacle/rover/infrared/frontright',  sensor_msgs.msg.Range,            queue_size=10)
+        self.publisher_infrared_rear_left   = rospy.Publisher('/appstacle/rover/infrared/rearleft',    sensor_msgs.msg.Range,            queue_size=10)
+        self.publisher_infrared_rear_right  = rospy.Publisher('/appstacle/rover/infrared/rearright',   sensor_msgs.msg.Range,            queue_size=10)
+        self.publisher_ultrasonic_front     = rospy.Publisher('/appstacle/rover/ultrasonic/front',     sensor_msgs.msg.Range,            queue_size=10)
+        self.publisher_ultrasonic_rear      = rospy.Publisher('/appstacle/rover/ultrasonic/rear',      sensor_msgs.msg.Range,            queue_size=10)
+        self.publisher_utilization_core0    = rospy.Publisher('/appstacle/rover/utilization/core0',    std_msgs.msg.Float32,             queue_size=10)
+        self.publisher_utilization_core1    = rospy.Publisher('/appstacle/rover/utilization/core1',    std_msgs.msg.Float32,             queue_size=10)
+        self.publisher_utilization_core2    = rospy.Publisher('/appstacle/rover/utilization/core2',    std_msgs.msg.Float32,             queue_size=10)
+        self.publisher_utilization_core3    = rospy.Publisher('/appstacle/rover/utilization/core3',    std_msgs.msg.Float32,             queue_size=10)
+
+        rospy.init_node(node_name, anonymous=False, disable_signals=True, log_level=rospy.INFO)
+
+    def publish(self, message):
+        log.debug('publish message: %s', message)
+
+        time = rospy.get_rostime()
+        header = std_msgs.msg.Header(stamp=rospy.get_rostime())
+
+        self.publish_tf(time)
+        self.publish_raw_data(message)
+        self.publish_imu(header, message)
+        self.publish_bearing(header, message)
+        self.publish_infrared(header, message)
+        self.publish_ultrasonic(header, message)
+        self.publish_utilization(header, message)
+
+    def publish_tf(self, time):
+        base_frame = 'appstacle/rover_frame'
+
+        send_transform = lambda position, rotation, publisher: {
+            self.transform_broadcaster.sendTransform(position, quaternion_from_euler(*rotation), time, self.calc_frame_id(publisher), base_frame)
+	}
+
+        # NOTE: these are just rough estimates
+        send_transform(( 0.00,  0.00, 0.20), (0, 0, radians(  0)), self.publisher_imu)
+        send_transform(( 0.15,  0.10, 0.08), (0, 0, radians( 45)), self.publisher_infrared_front_left)
+        send_transform(( 0.15, -0.10, 0.08), (0, 0, radians(-45)), self.publisher_infrared_front_right)
+        send_transform((-0.15,  0.10, 0.08), (0, 0, radians( 45)), self.publisher_infrared_rear_left)
+        send_transform((-0.15, -0.10, 0.08), (0, 0, radians(-45)), self.publisher_infrared_rear_right)
+        send_transform(( 0.15,  0.00, 0.12), (0, 0, radians(  0)), self.publisher_ultrasonic_front)
+        send_transform((-0.15,  0.00, 0.12), (0, 0, radians(180)), self.publisher_ultrasonic_rear)
+
+    def publish_raw_data(self, raw_data):
+        message = json.dumps(raw_data, indent=None)
+        self.publisher_raw.publish(message)
+
+    def publish_imu(self, header, raw_data):
+        try:
+            data = raw_data['gy521']
+
+            angle = self.deg_to_rad(data['angle'])
+            accel = self.deg_to_rad(self.convert_default_value(data['accel'], -1, 0))
+            gyro  = self.deg_to_rad(self.convert_default_value(data['gyro'],  -1, 0))
+
+            header_with_frame = deepcopy(header)
+            header_with_frame.frame_id = self.calc_frame_id(self.publisher_imu)
+
+            self.publisher_imu.publish(
+                header=header_with_frame,
+                orientation=geometry_msgs.msg.Quaternion(*quaternion_from_euler(angle['x'], angle['y'], angle['z'])),
+                linear_acceleration=geometry_msgs.msg.Vector3(accel['x'], accel['y'], accel['z']),
+                angular_velocity=geometry_msgs.msg.Vector3(gyro['x'], gyro['y'], gyro['z']))
+        except KeyError:
+            pass
+
+    def publish_bearing(self, header, raw_data):
+        try:
+            data = raw_data['hmc5883l']
+            self.publisher_bearing.publish(data=data['bearing'])
+        except KeyError:
+            pass
+
+    def publish_infrared(self, header, raw_data):
+        try:
+            data = raw_data['infrared']
+
+            range_commons = dict(radiation_type=sensor_msgs.msg.Range.INFRARED,
+                                 field_of_view=0.01,
+                                 min_range=0.10,
+                                 max_range=1.00)
+
+            self.publish_range(self.publisher_infrared_front_left,  header, range_commons, data['frontleft'])
+            self.publish_range(self.publisher_infrared_front_right, header, range_commons, data['frontright'])
+            self.publish_range(self.publisher_infrared_rear_left,   header, range_commons, data['rearleft'])
+            self.publish_range(self.publisher_infrared_rear_right,  header, range_commons, data['rearright'])
+        except KeyError:
+            pass
+
+    def publish_ultrasonic(self, header, raw_data):
+        try:
+            data = raw_data['ultrasonic']
+
+            range_commons = dict(radiation_type=sensor_msgs.msg.Range.ULTRASOUND,
+                                 field_of_view=0.262,
+                                 min_range=0.02,
+                                 max_range=4.00)
+
+            self.publish_range(self.publisher_ultrasonic_front, header, range_commons, data['front'])
+            self.publish_range(self.publisher_ultrasonic_rear,  header, range_commons, data['rear'])
+        except KeyError:
+            pass
+
+    def publish_utilization(self, header, raw_data):
+        try:
+            data = raw_data['cores']
+            self.publisher_utilization_core0.publish(data=data['core0'])
+            self.publisher_utilization_core1.publish(data=data['core1'])
+            self.publisher_utilization_core2.publish(data=data['core2'])
+            self.publisher_utilization_core3.publish(data=data['core3'])
+        except KeyError:
+            pass
+
+    def publish_range(self, publisher, header, range_commons, range_value):
+            header_with_frame = deepcopy(header)
+            header_with_frame.frame_id = self.calc_frame_id(publisher)
+
+            range_msg = deepcopy(range_commons)
+            range_msg['header'] = header_with_frame
+            range_msg['range'] = self.cm_to_m(range_value)
+
+            publisher.publish(**range_msg)
+
+    def deg_to_rad(self, properties):
+        return {k: radians(v) for k, v in properties.iteritems()}
+
+    def cm_to_m(self, value):
+        return value / 100.0
+
+    def convert_default_value(self, properties, default_in, default_out):
+        return {k: default_out if v == default_in else v for k, v in properties.iteritems()}
+
+    def calc_frame_id(self, publisher):
+        return publisher.name + '_frame'
+
+
+# Note: rospy overwrites the root logger.
+# One way to prevent this is to set the environment variable ROS_PYTHON_LOG_CONFIG_FILE externally to an empty value.
+# The other way is to explicitely configure all relevent loggers, which is done here.
+def configure_logging():
+    logging.basicConfig(level=logging.DEBUG)
+
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+
+    log.setLevel(logging.DEBUG)
+    log.addHandler(console_handler)
+
+    logging.getLogger('proton').setLevel(logging.DEBUG)
+    logging.getLogger('proton').addHandler(console_handler)
+
+
+def parse_cli_options():
+    parser = optparse.OptionParser(usage='usage: %prog [options]')
+
+    parser.add_option('--hono-messaging-uri', type='str', default='amqps://127.0.0.1:15671',
+                      help='Eclipse Hono messaging URI (default "%default")')
+    parser.add_option('--hono-messaging-user', type='str', default='consumer@HONO',
+                      help='username used for connecting (default "%default")')
+    parser.add_option('--hono-messaging-password', type='str', default='verysecret',
+                      help='password used for connecting (default "%default")')
+    parser.add_option('--topic', type='str', default='telemetry/DEFAULT_TENANT',
+                      help='message topic to subscribe to (default "%default")')
+    parser.add_option('--device-id', type='str', default=None,
+                      help='device id to filter for (default "%default")')
+
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    configure_logging()
+    opts, args = parse_cli_options()
+    try:
+        ros_publisher = Ros1Publisher()
+        Container(HonoSubscriber(opts, ros_publisher)).run()
+    except KeyboardInterrupt:
+        rospy.signal_shutdown('requested shutdown')

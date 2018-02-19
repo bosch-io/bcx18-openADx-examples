@@ -1,0 +1,110 @@
+#!/usr/bin/env python2
+
+# Copyright (c) 2018 Bosch Software Innovations GmbH.
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Eclipse Public License v2.0
+# which accompanies this distribution, and is available at
+# http://www.eclipse.org/legal/epl-v20.html
+#
+# Contributors:
+#    Bosch Software Innovations GmbH - initial creation
+#
+# Disclaimer: This software is experimental and intended to be used on the Bosch Connected Experience 2018
+
+# Persists Appstacle Rover messages from Eclipse Hono to disk.
+
+import json
+import logging
+import optparse
+import os
+
+from datetime import datetime
+from proton.handlers import MessagingHandler
+from proton.reactor import Container
+
+
+class MessagingToDisk(MessagingHandler):
+    def __init__(self, opts):
+        super(MessagingToDisk, self).__init__()
+        self.opts = opts
+
+    def on_start(self, event):
+        logging.info('start')
+        connection = event.container.connect(url=self.opts.hono_messaging_uri,
+                                             user=self.opts.hono_messaging_user,
+                                             password=self.opts.hono_messaging_password,
+                                             allowed_mechs='PLAIN')
+        event.container.create_receiver(connection, self.opts.topic)
+
+    def on_message(self, event):
+        logging.debug('got message %s', event.message)
+
+        # possible content:
+        # - event.message.properties['device_id']
+        # - event.message.body
+        # - event.message.content_type
+
+        if self.opts.device_id and self.opts.device_id != event.message.properties['device_id']:
+            logging.info('dropping message with device id %s because filtering for device id %s', event.message.properties['device_id'], self.opts.device_id)
+            return
+
+        try:
+            message_in = json.loads(event.message.body.decode('utf-8'))
+        except ValueError:
+            logging.info('dropping message due to invalid json')
+            return
+
+        # format JSON as single line to be able to have multiple JSON values per file - see http://jsonlines.org/
+        message_out = json.dumps(message_in, indent=None)
+
+        filepath = self.create_filepath(event.message)
+        logging.debug('writing to file %s', filepath)
+
+        if not os.path.exists(os.path.dirname(filepath)):
+            os.makedirs(os.path.dirname(filepath))
+
+        with open(filepath, mode='a') as f:
+            f.write(message_out.encode('utf-8'))
+            f.write('\n')
+
+    def create_filepath(self, message):
+        timestamp = self.create_rotation_timestamp(opts.rotation)
+        return os.path.join(self.opts.basepath,
+                            message.properties['device_id'],
+                            'appstacle-rover-' + timestamp + '.jsonl')
+
+    def create_rotation_timestamp(self, seconds):
+        if seconds <= 0:
+            return ''
+
+        epoch = datetime.utcfromtimestamp(0)
+        now = datetime.now()
+        timestamp = (now - epoch).total_seconds() // seconds * seconds
+        return datetime.utcfromtimestamp(timestamp).strftime('%Y%m%d%H%M%S')
+
+
+def parse_cli_options():
+    parser = optparse.OptionParser(usage='usage: %prog [options]')
+
+    parser.add_option('--hono-messaging-uri', type='str', default='amqps://127.0.0.1:15671',
+                      help='Eclipse Hono messaging URI (default "%default")')
+    parser.add_option('--hono-messaging-user', type='str', default='consumer@HONO',
+                      help='username used for connecting (default "%default")')
+    parser.add_option('--hono-messaging-password', type='str', default='verysecret',
+                      help='password used for connecting (default "%default")')
+    parser.add_option('--topic', type='str', default='telemetry/DEFAULT_TENANT',
+                      help='message topic to subscribe to (default "%default")')
+    parser.add_option('--device-id', type='str', default=None,
+                      help='device id to filter for (default "%default")')
+    parser.add_option('-b', '--basepath', type='str', default='.',
+                      help='filesystem base path used to persist message to (default "%default")')
+    parser.add_option('-r', '--rotation', type=int, default=60,
+                      help='file rotation in seconds (default %default)')
+
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+    opts, args = parse_cli_options()
+    Container(MessagingToDisk(opts)).run()

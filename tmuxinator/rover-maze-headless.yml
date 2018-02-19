@@ -1,0 +1,37 @@
+# ~/.tmuxinator/rover-maze-headless.yml
+
+# Copyright (c) 2018 Bosch Software Innovations GmbH.
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Eclipse Public License v2.0
+# which accompanies this distribution, and is available at
+# http://www.eclipse.org/legal/epl-v20.html
+#
+# Contributors:
+#    Bosch Software Innovations GmbH - initial creation
+#
+# Disclaimer: This software is experimental and intended to be used on the Bosch Connected Experience 2018
+
+# cf. http://docs.erlerobotics.com/simulation/vehicles/erle_rover/tutorial_2
+
+name: rover-maze-headless
+root: ~/rover-simulation/
+
+windows:
+  - ros:
+      layout: tiled
+      panes:
+        - pilot:
+          - source /opt/ros/kinetic/setup.bash
+          - source ~/rover-simulation/ros_catkin_ws/devel/setup.bash
+          - cd ~/rover-simulation/ardupilot/APMrover2
+          - ../Tools/autotest/sim_vehicle.sh --version
+          - tmux wait-for -S ready
+          - ../Tools/autotest/sim_vehicle.sh -j 4 -f Gazebo
+          - param load /home/vagrant/rover-simulation/ardupilot/Tools/Frame_params/3DR_Rover.param
+        - simulation:
+          - tmux wait-for ready
+          - sleep 2
+          - source /opt/ros/kinetic/setup.bash
+          - source ~/rover-simulation/ros_catkin_ws/devel/setup.bash
+          - source ~/gazebo_environment.sh
+          - roslaunch ardupilot_sitl_gazebo_plugin rover_maze.launch gui:=false headless:=true
